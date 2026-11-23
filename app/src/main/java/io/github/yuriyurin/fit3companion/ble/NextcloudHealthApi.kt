@@ -56,9 +56,9 @@ internal data class NextcloudHealthWrite(
 /**
  * HTTPS client for the public OCS API exposed by Nextcloud Health v3.
  *
- * Fit3 data is mapped only where Nextcloud has an equivalent metric: daily steps, pulse, and
- * oxygen saturation. The device-specific app password is encrypted with Android Keystore before
- * it is persisted, allowing background uploads without retaining the account password.
+ * Fit3 data is mapped to Nextcloud daily steps, pulse, oxygen saturation, and a five-band stress
+ * scale. The device-specific app password is encrypted with Android Keystore before it is
+ * persisted, allowing background uploads without retaining the account password.
  */
 class NextcloudHealthApi(context: Context) {
     companion object {
@@ -94,6 +94,11 @@ class NextcloudHealthApi(context: Context) {
             bytes[8] = ((bytes[8].toInt() and 0x3f) or 0x80).toByte()
             val buffer = ByteBuffer.wrap(bytes)
             return UUID(buffer.long, buffer.long).toString()
+        }
+
+        /** Equal-width conversion: 1..20 -> 1, 21..40 -> 2, ... 81..100 -> 5. */
+        internal fun rescaleStress(score: Int): Int? = score.takeIf { it in 0..100 }?.let {
+            if (it == 0) 1 else ((it - 1) / 20) + 1
         }
 
         internal fun writes(
@@ -134,6 +139,22 @@ class NextcloudHealthApi(context: Context) {
             }
             measurement("pulse", health.heartRate, health.heartRateAt, "bpm", 25..250)
             measurement("oxygen_saturation", health.spo2, health.spo2At, "percent", 50..100)
+            val stressAt = health.stressAt?.takeIf {
+                it in EARLIEST_MEASUREMENT_MILLIS..(capturedAt + 5 * 60_000L)
+            }
+            val stress = health.stress?.let(::rescaleStress)
+            if (stressAt != null && stress != null) add(NextcloudHealthWrite(
+                method = "POST",
+                path = "$API_PATH/entries",
+                body = linkedMapOf(
+                    "metricKey" to "stress",
+                    "numericValue" to stress,
+                    "recordedAt" to Instant.ofEpochMilli(stressAt).toString(),
+                    "context" to "manual",
+                    "source" to "mobile",
+                    "operationId" to operationId("stress", stressAt),
+                ),
+            ))
         }
     }
 
@@ -378,7 +399,7 @@ class NextcloudHealthApi(context: Context) {
         val root = JSONObject(encoded)
         require(root.optInt("version") == 1)
         val array = root.getJSONArray("writes")
-        require(array.length() in 1..3)
+        require(array.length() in 1..4)
         return (0 until array.length()).map { index ->
             val item = array.getJSONObject(index)
             val method = item.getString("method").also { require(it == "PUT" || it == "POST") }

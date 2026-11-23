@@ -29,17 +29,30 @@ class NextcloudHealthApiTest {
             spo2 = 98,
             spo2At = oxygenAt,
             stress = 31,
+            stressAt = pulseAt,
             sleepMinutes = 438,
         ))
 
         val writes = NextcloudHealthApi.writes(snapshot,
             Instant.parse("2026-11-23T12:05:00Z").toEpochMilli())
-        assertEquals(3, writes.size)
+        assertEquals(4, writes.size)
         assertEquals("PUT", writes[0].method)
         assertEquals("${NextcloudHealthApi.API_PATH}/daily-values/steps/2026-11-23", writes[0].path)
         assertEquals(6_234, writes[0].body["numericValue"])
         assertEquals(listOf("pulse", "oxygen_saturation"),
-            writes.drop(1).map { it.body["metricKey"] })
+            writes.slice(1..2).map { it.body["metricKey"] })
+        assertEquals("stress", writes[3].body["metricKey"])
+        assertEquals(2, writes[3].body["numericValue"])
+    }
+
+    @Test fun rescalesStressIntoFiveEqualBands() {
+        assertEquals(1, NextcloudHealthApi.rescaleStress(1))
+        assertEquals(1, NextcloudHealthApi.rescaleStress(20))
+        assertEquals(2, NextcloudHealthApi.rescaleStress(21))
+        assertEquals(3, NextcloudHealthApi.rescaleStress(60))
+        assertEquals(4, NextcloudHealthApi.rescaleStress(80))
+        assertEquals(5, NextcloudHealthApi.rescaleStress(100))
+        assertNull(NextcloudHealthApi.rescaleStress(101))
     }
 
     @Test fun retryOperationIdsAreStableUuidV4Values() {

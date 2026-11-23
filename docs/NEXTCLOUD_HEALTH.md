@@ -37,21 +37,36 @@ Only measurements with an equivalent Nextcloud Health metric are synchronized:
 | Daily steps | `PUT /ocs/v2.php/apps/health/api/v2/daily-values/steps/{date}` with unit `steps` |
 | Heart rate | `POST /ocs/v2.php/apps/health/api/v2/measurements` as `pulse`, unit `bpm` |
 | Blood oxygen | `POST /ocs/v2.php/apps/health/api/v2/measurements` as `oxygen_saturation`, unit `percent` |
+| Stress | `POST /ocs/v2.php/apps/health/api/v2/entries` as the `stress` journal metric |
 
-Fit3 stress is not sent because its 0–100 score is not equivalent to Nextcloud Health's 1–5
-journal scale. Sleep, distance, floors, and active minutes are not currently exposed as compatible
-Health v3 metrics. Active calories are a cumulative daily value, while Nextcloud expects atomic
-kilocalorie measurements, so sending the Fit3 total repeatedly would inflate the sum.
+Fit3 stress is rescaled into five equal bands for Nextcloud Health:
+
+- Fit3 1–20 → Nextcloud 1
+- Fit3 21–40 → Nextcloud 2
+- Fit3 41–60 → Nextcloud 3
+- Fit3 61–80 → Nextcloud 4
+- Fit3 81–100 → Nextcloud 5
+
+A Fit3 value of 0 is treated as 1. Sleep, distance, floors, and active minutes are not currently
+exposed as compatible Health v3 metrics. Active calories are a cumulative daily value, while
+Nextcloud expects atomic kilocalorie measurements, so sending the Fit3 total repeatedly would
+inflate the sum.
 
 ## Retry behavior
 
-After every successful watch health sync, the newest supported Fit3 values are queued. A failed
-upload remains queued and is retried every five minutes while the connection service runs.
+While the band is connected, Fit3 App requests health data approximately every five minutes.
+Immediately after each successful watch health response, the newest supported values are queued
+for Nextcloud. A failed upload remains queued and is retried every five minutes while the
+connection service runs. The **Sync now** button queues the current values immediately.
 
-Daily steps use Nextcloud's idempotent daily-value `PUT`. Pulse and oxygen saturation requests
-carry deterministic UUID v4 `operationId` values derived from their metric and watch timestamp.
-This lets Nextcloud return an existing measurement when a request is retried instead of creating
-a duplicate.
+Each run sends the step total for the Fit3 record's current day plus the latest pulse, oxygen
+saturation, and stress readings held in the snapshot. It does not backfill older local measurement
+history.
+
+Daily steps use Nextcloud's idempotent daily-value `PUT`. Pulse, oxygen saturation, and stress
+requests carry deterministic UUID v4 `operationId` values derived from their metric and watch
+timestamp. This lets Nextcloud return an existing record when a request is retried instead of
+creating a duplicate.
 
 If newer Fit3 data arrives while an upload is in progress, it replaces the queued snapshot and is
 sent immediately after the current request finishes.

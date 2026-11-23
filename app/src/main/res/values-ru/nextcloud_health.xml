@@ -3,7 +3,8 @@
     <string name="nextcloud_health_title">Nextcloud Health</string>
     <string name="nextcloud_health_settings_summary">Синхронизация данных Fit3 с Nextcloud</string>
     <string name="nextcloud_health_description">Подключитесь к серверу Nextcloud с установленным приложением Health. Новые данные Fit3 будут синхронизироваться автоматически после каждой успешной синхронизации с браслетом.</string>
-    <string name="nextcloud_health_sync_scope">Синхронизируются шаги за день, пульс и насыщение крови кислородом через API Nextcloud Health.</string>
+    <string name="nextcloud_health_sync_scope">Синхронизируются шаги за день, пульс, насыщение крови кислородом и стресс. Стресс Fit3 преобразуется из шкалы 1–100 в пять равных диапазонов Nextcloud.</string>
+    <string name="nextcloud_health_sync_timing">Пока браслет подключён, данные синхронизируются примерно каждые 5 минут. Отправляются шаги за сегодня и последние значения пульса, кислорода и стресса; старая история не выгружается. Неудачные отправки повторяются каждые 5 минут.</string>
     <string name="nextcloud_health_connected_as">Подключено как %1$s</string>
     <string name="nextcloud_health_server_url">Адрес сервера Nextcloud</string>
     <string name="nextcloud_health_server_url_hint">https://cloud.example.com</string>

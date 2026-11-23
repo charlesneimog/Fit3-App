@@ -3,7 +3,8 @@
     <string name="nextcloud_health_title">Nextcloud Health</string>
     <string name="nextcloud_health_settings_summary">Sync Fit3 health data to your Nextcloud</string>
     <string name="nextcloud_health_description">Connect to a Nextcloud server with the Health app installed. New Fit3 health data is synchronized automatically after each successful watch sync.</string>
-    <string name="nextcloud_health_sync_scope">Syncs daily steps, pulse, and oxygen saturation through the Nextcloud Health API.</string>
+    <string name="nextcloud_health_sync_scope">Syncs daily steps, pulse, oxygen saturation, and stress. Fit3 stress is converted from 1–100 into five equal bands for Nextcloud.</string>
+    <string name="nextcloud_health_sync_timing">While connected, health data is synced about every 5 minutes. Each sync sends today’s step total and the latest pulse, oxygen, and stress readings; it does not backfill older history. Failed uploads retry every 5 minutes.</string>
     <string name="nextcloud_health_connected_as">Connected as %1$s</string>
     <string name="nextcloud_health_server_url">Nextcloud server URL</string>
     <string name="nextcloud_health_server_url_hint">https://cloud.example.com</string>

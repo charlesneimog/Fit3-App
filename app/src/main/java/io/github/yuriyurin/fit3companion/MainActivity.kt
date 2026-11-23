@@ -3233,6 +3233,9 @@ private fun NextcloudHealthSettingsPage(
             Text(stringResource(R.string.nextcloud_health_sync_scope), localize = false,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(stringResource(R.string.nextcloud_health_sync_timing), localize = false,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
             HorizontalDivider()
             Text(nextcloudHealthStatusLabel(state), localize = false,
                 style = MaterialTheme.typography.titleMedium)
