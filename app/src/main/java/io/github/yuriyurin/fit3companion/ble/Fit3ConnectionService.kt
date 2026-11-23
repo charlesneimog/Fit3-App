@@ -45,6 +45,9 @@ class Fit3ConnectionService : Service() {
     private val diagnosticWriter = Executors.newSingleThreadExecutor()
     private val weatherWorker = Executors.newSingleThreadExecutor()
     private val faceWorker = Executors.newSingleThreadExecutor()
+    private val nextcloudHealthWorker = Executors.newSingleThreadExecutor()
+    private lateinit var nextcloudHealthApi: NextcloudHealthApi
+    private var nextcloudHealthOperationBusy = false
     @Volatile private var faceDownloadBusy = false
     private lateinit var weatherRepository: Fit3WeatherRepository
     private var weatherForecast: WeatherForecast? = null
@@ -70,6 +73,7 @@ class Fit3ConnectionService : Service() {
             }
             if (snapshot.sapReady) refreshWeatherIfNeeded()
             maybeAutoBackup()
+            retryNextcloudHealthUploadIfDue()
             handler.postDelayed(this, 60_000)
         }
     }
@@ -129,6 +133,8 @@ class Fit3ConnectionService : Service() {
             fileState = value; snapshot = snapshot.copy(bandFiles = value); listener?.invoke(snapshot)
         }
         weatherRepository = Fit3WeatherRepository(this)
+        nextcloudHealthApi = NextcloudHealthApi(this)
+        snapshot = snapshot.copy(nextcloudHealth = nextcloudHealthApi.localState())
         weatherForecast = weatherRepository.cachedForecast()
         weatherStatus = if (weatherRepository.selectedCity() == null) "Выберите город" else
             if (weatherForecast == null) "Ожидаем погоду" else weatherForecast!!.source
@@ -153,9 +159,25 @@ class Fit3ConnectionService : Service() {
         var wasSapReady = false
         var wasReadyForSettings = false
         var wasReadyForNotifications = false
+        if (nextcloudHealthApi.hasCredentials()) {
+            nextcloudHealthOperationBusy = true
+            snapshot = snapshot.copy(nextcloudHealth = nextcloudHealthApi.localState(
+                NextcloudHealthStatus.CHECKING, busy = true))
+            nextcloudHealthWorker.execute {
+                val result = nextcloudHealthApi.checkConnection()
+                handler.post {
+                    nextcloudHealthOperationBusy = false
+                    publishNextcloudHealth(result)
+                    retryNextcloudHealthUploadIfDue()
+                }
+            }
+        }
         ble = Fit3BleClient(applicationContext, onUpdate = { current ->
+            val previousSuccessfulSync = snapshot.health.lastSuccessfulSyncMillis
             if (!current.connected) firmwareFlasher.onBandDisconnected()
-            snapshot = current.copy(firmwareFlash = firmwareState, bandFiles = fileState, weather = weatherForecast, weatherStatus = weatherStatus,
+            snapshot = current.copy(nextcloudHealth = snapshot.nextcloudHealth,
+                firmwareFlash = firmwareState,
+                bandFiles = fileState, weather = weatherForecast, weatherStatus = weatherStatus,
                 weatherLocationRequested = weatherLocationRequested)
             val pending = if (adbLogEnabled) current.protocolLog.takeWhile { it != lastProtocolEntry }
                 .asReversed() else emptyList()
@@ -215,6 +237,10 @@ class Fit3ConnectionService : Service() {
             }
             wasReadyForSettings = readyForSettings
             wasSapReady = current.sapReady
+            if (current.health.lastSuccessfulSyncMillis != null &&
+                current.health.lastSuccessfulSyncMillis != previousSuccessfulSync) {
+                queueNextcloudHealthUpload()
+            }
         }, onWatchNotificationCommand = { key, command ->
             handler.post { Fit3NotificationListener.active?.handleWatchCommand(key, command) }
         }, onWeatherRequest = { kind ->
@@ -452,6 +478,78 @@ class Fit3ConnectionService : Service() {
     fun saveLocalBackup() = ble.saveLocalBackup()
     fun restoreLocalBackup() = ble.restoreLocalBackup()
     fun sendTestNotification() = ble.sendTestNotification()
+
+    private fun publishNextcloudHealth(state: NextcloudHealthState) {
+        snapshot = snapshot.copy(nextcloudHealth = state)
+        listener?.invoke(snapshot)
+    }
+
+    fun connectNextcloudHealth(serverUrl: String, username: String, appPassword: String) {
+        if (nextcloudHealthOperationBusy || serverUrl.isBlank() || username.isBlank() ||
+            appPassword.isBlank()) return
+        nextcloudHealthOperationBusy = true
+        publishNextcloudHealth(snapshot.nextcloudHealth.copy(
+            serverUrl = serverUrl.trim(),
+            username = username.trim(),
+            status = NextcloudHealthStatus.CHECKING,
+            busy = true,
+            detail = null,
+        ))
+        nextcloudHealthWorker.execute {
+            val result = nextcloudHealthApi.connect(serverUrl, username, appPassword)
+            handler.post {
+                nextcloudHealthOperationBusy = false
+                publishNextcloudHealth(result)
+                if (result.authenticated) uploadNextcloudHealthNow()
+            }
+        }
+    }
+
+    fun disconnectNextcloudHealth() {
+        if (nextcloudHealthOperationBusy) return
+        publishNextcloudHealth(nextcloudHealthApi.disconnect())
+    }
+
+    fun uploadNextcloudHealthNow() {
+        if (!nextcloudHealthApi.hasCredentials()) return
+        publishNextcloudHealth(nextcloudHealthApi.queue(snapshot))
+        startNextcloudHealthUpload()
+    }
+
+    private fun queueNextcloudHealthUpload() {
+        if (!nextcloudHealthApi.hasCredentials()) return
+        publishNextcloudHealth(nextcloudHealthApi.queue(snapshot))
+        startNextcloudHealthUpload()
+    }
+
+    private fun startNextcloudHealthUpload() {
+        if (nextcloudHealthOperationBusy || !nextcloudHealthApi.hasCredentials() ||
+            !snapshot.nextcloudHealth.pendingUpload) return
+        nextcloudHealthOperationBusy = true
+        publishNextcloudHealth(nextcloudHealthApi.localState(
+            NextcloudHealthStatus.UPLOADING, busy = true))
+        nextcloudHealthWorker.execute {
+            val result = nextcloudHealthApi.uploadPending()
+            handler.post {
+                nextcloudHealthOperationBusy = false
+                publishNextcloudHealth(result)
+                if (result.authenticated && result.pendingUpload) startNextcloudHealthUpload()
+            }
+        }
+    }
+
+    private fun retryNextcloudHealthUploadIfDue() {
+        if (nextcloudHealthOperationBusy || !nextcloudHealthApi.hasCredentials() ||
+            !snapshot.nextcloudHealth.pendingUpload) return
+        nextcloudHealthOperationBusy = true
+        nextcloudHealthWorker.execute {
+            val result = nextcloudHealthApi.retryPendingIfDue()
+            handler.post {
+                nextcloudHealthOperationBusy = false
+                publishNextcloudHealth(result)
+            }
+        }
+    }
     fun forwardNotification(
         appName: String,
         title: String,
@@ -491,6 +589,7 @@ class Fit3ConnectionService : Service() {
         diagnosticWriter.shutdown()
         weatherWorker.shutdown()
         faceWorker.shutdown()
+        nextcloudHealthWorker.shutdown()
         super.onDestroy()
     }
 }

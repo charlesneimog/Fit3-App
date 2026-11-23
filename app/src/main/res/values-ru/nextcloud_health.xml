@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nextcloud_health_title">Nextcloud Health</string>
+    <string name="nextcloud_health_settings_summary">Синхронизация данных Fit3 с Nextcloud</string>
+    <string name="nextcloud_health_description">Подключитесь к серверу Nextcloud с установленным приложением Health. Новые данные Fit3 будут синхронизироваться автоматически после каждой успешной синхронизации с браслетом.</string>
+    <string name="nextcloud_health_sync_scope">Синхронизируются шаги за день, пульс и насыщение крови кислородом через API Nextcloud Health.</string>
+    <string name="nextcloud_health_connected_as">Подключено как %1$s</string>
+    <string name="nextcloud_health_server_url">Адрес сервера Nextcloud</string>
+    <string name="nextcloud_health_server_url_hint">https://cloud.example.com</string>
+    <string name="nextcloud_health_username">Имя пользователя</string>
+    <string name="nextcloud_health_app_password">Пароль приложения</string>
+    <string name="nextcloud_health_app_password_hint">Создайте пароль устройства в личных настройках Nextcloud в разделе безопасности</string>
+    <string name="nextcloud_health_connect">Подключить</string>
+    <string name="nextcloud_health_disconnect">Отключить</string>
+    <string name="nextcloud_health_credentials_saved">Используйте отдельный пароль приложения, а не пароль учётной записи. Он шифруется на устройстве с помощью Android Keystore.</string>
+    <string name="nextcloud_health_upload_now">Синхронизировать</string>
+    <string name="nextcloud_health_last_upload">Последняя синхронизация: %1$s</string>
+    <string name="nextcloud_health_pending_upload">Данные здоровья ожидают отправки; попытка будет повторена автоматически.</string>
+    <string name="nextcloud_health_status_disconnected">Нет подключения</string>
+    <string name="nextcloud_health_status_checking">Проверяем Nextcloud Health…</string>
+    <string name="nextcloud_health_status_connected">Подключено к Nextcloud Health</string>
+    <string name="nextcloud_health_status_uploading">Синхронизируем данные здоровья…</string>
+    <string name="nextcloud_health_status_uploaded">Данные здоровья синхронизированы</string>
+    <string name="nextcloud_health_status_no_data">Поддерживаемых данных Fit3 пока нет</string>
+    <string name="nextcloud_health_status_authentication_failed">Nextcloud отклонил имя пользователя или пароль приложения</string>
+    <string name="nextcloud_health_status_invalid_server">Введите корректный HTTPS-адрес Nextcloud</string>
+    <string name="nextcloud_health_status_app_unavailable">На сервере не найден Nextcloud Health с API v2</string>
+    <string name="nextcloud_health_status_network_error">Не удалось связаться с сервером Nextcloud</string>
+    <string name="nextcloud_health_status_server_error">Сервер Nextcloud отклонил запрос</string>
+</resources>

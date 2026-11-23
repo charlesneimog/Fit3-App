@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nextcloud_health_title">Nextcloud Health</string>
+    <string name="nextcloud_health_settings_summary">Sync Fit3 health data to your Nextcloud</string>
+    <string name="nextcloud_health_description">Connect to a Nextcloud server with the Health app installed. New Fit3 health data is synchronized automatically after each successful watch sync.</string>
+    <string name="nextcloud_health_sync_scope">Syncs daily steps, pulse, and oxygen saturation through the Nextcloud Health API.</string>
+    <string name="nextcloud_health_connected_as">Connected as %1$s</string>
+    <string name="nextcloud_health_server_url">Nextcloud server URL</string>
+    <string name="nextcloud_health_server_url_hint">https://cloud.example.com</string>
+    <string name="nextcloud_health_username">Username</string>
+    <string name="nextcloud_health_app_password">App password</string>
+    <string name="nextcloud_health_app_password_hint">Create a device password in Nextcloud personal settings under Security</string>
+    <string name="nextcloud_health_connect">Connect</string>
+    <string name="nextcloud_health_disconnect">Disconnect</string>
+    <string name="nextcloud_health_credentials_saved">Use a device-specific app password, not your account password. It is encrypted with Android Keystore on this device.</string>
+    <string name="nextcloud_health_upload_now">Sync now</string>
+    <string name="nextcloud_health_last_upload">Last synced: %1$s</string>
+    <string name="nextcloud_health_pending_upload">Health data is waiting to sync and will be retried automatically.</string>
+    <string name="nextcloud_health_status_disconnected">Not connected</string>
+    <string name="nextcloud_health_status_checking">Checking Nextcloud Health…</string>
+    <string name="nextcloud_health_status_connected">Connected to Nextcloud Health</string>
+    <string name="nextcloud_health_status_uploading">Syncing health data…</string>
+    <string name="nextcloud_health_status_uploaded">Health data synced</string>
+    <string name="nextcloud_health_status_no_data">No supported Fit3 health data is available yet</string>
+    <string name="nextcloud_health_status_authentication_failed">Nextcloud rejected the username or app password</string>
+    <string name="nextcloud_health_status_invalid_server">Enter a valid HTTPS Nextcloud URL</string>
+    <string name="nextcloud_health_status_app_unavailable">Nextcloud Health with API v2 was not found on this server</string>
+    <string name="nextcloud_health_status_network_error">Could not reach the Nextcloud server</string>
+    <string name="nextcloud_health_status_server_error">The Nextcloud server rejected the request</string>
+</resources>

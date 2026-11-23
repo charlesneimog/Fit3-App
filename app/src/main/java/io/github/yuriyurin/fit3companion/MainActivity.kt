@@ -156,6 +156,7 @@ import androidx.core.view.WindowCompat
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -181,6 +182,8 @@ import io.github.yuriyurin.fit3companion.protocol.Fit3OrderedItem
 import io.github.yuriyurin.fit3companion.protocol.ActivityGoals
 import io.github.yuriyurin.fit3companion.ble.Fit3ActivityGoalStore
 import io.github.yuriyurin.fit3companion.ble.GoalSyncState
+import io.github.yuriyurin.fit3companion.ble.NextcloudHealthState
+import io.github.yuriyurin.fit3companion.ble.NextcloudHealthStatus
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
@@ -440,6 +443,11 @@ class MainActivity : ComponentActivity() {
                     onConsumeWeatherLocationRequest = { connectionService?.consumeWeatherLocationRequest() },
                     onRequestHealth = { connectionService?.requestHealthNow() },
                     onRequestHealthCapabilityForDebug = { connectionService?.requestHealthCapabilityForDebug() },
+                    onNextcloudHealthConnect = { serverUrl, username, appPassword ->
+                        connectionService?.connectNextcloudHealth(serverUrl, username, appPassword)
+                    },
+                    onNextcloudHealthDisconnect = { connectionService?.disconnectNextcloudHealth() },
+                    onNextcloudHealthUpload = { connectionService?.uploadNextcloudHealthNow() },
                     stepGoal = stepGoal,
                     dailySteps = dailySteps,
                     homeTiles = homeTiles,
@@ -839,7 +847,8 @@ private enum class Page(val label: String) {
     FACE_VARIANTS("Варианты циферблата"), CUSTOM_FACES("Установленные"),
     SETTINGS("Настройки приложения"), WATCH_SETTINGS("Экран"), WIDGETS("Карточки"),
     APPS("Приложения"), QUICK_PANEL("Быстрая панель"), QUICK_MESSAGES("Быстрые ответы"),
-    BACKUP("Резервная копия"), ABOUT("О приложении"), DEBUG("Отладка"),
+    BACKUP("Резервная копия"), NEXTCLOUD_HEALTH("Nextcloud Health"),
+    ABOUT("О приложении"), DEBUG("Отладка"),
     LICENSES("Лицензии и благодарности"),
     NOTIFICATIONS("Уведомления"), POWER("Энергосбережение"),
     FIT3UI("Fit3UI"), FILES("Файловый менеджер"), FLASHER("Прошивальщик"), APPEARANCE("Внешний вид"),
@@ -859,7 +868,7 @@ private fun Page.backDestination(): Page? = when (this) {
     Page.WATCH_TIME, Page.WATCH_ORIENTATION -> Page.FACES
     Page.FACE_VARIANTS -> Page.FACE_GALLERY
     Page.WIDGETS, Page.APPS, Page.QUICK_PANEL, Page.QUICK_MESSAGES -> Page.WATCH_LAYOUT
-    Page.BACKUP, Page.ABOUT, Page.NOTIFICATIONS, Page.APPEARANCE,
+    Page.BACKUP, Page.NEXTCLOUD_HEALTH, Page.ABOUT, Page.NOTIFICATIONS, Page.APPEARANCE,
     Page.POWER -> Page.SETTINGS
     Page.LICENSES -> Page.ABOUT
     Page.HEALTH_SYNC -> Page.DEBUG
@@ -946,6 +955,9 @@ private fun CompanionScreen(
     onConsumeWeatherLocationRequest: () -> Unit,
     onRequestHealth: () -> Unit,
     onRequestHealthCapabilityForDebug: () -> Unit,
+    onNextcloudHealthConnect: (String, String, String) -> Unit,
+    onNextcloudHealthDisconnect: () -> Unit,
+    onNextcloudHealthUpload: () -> Unit,
     stepGoal: Int,
     dailySteps: Map<Long, Int>,
     homeTiles: List<HomeTile>,
@@ -1566,6 +1578,12 @@ private fun CompanionScreen(
                         { onPage(Page.POWER) }) }
                     item { SettingsChoice("Внешний вид", stringResource(R.string.appearance_subtitle), { onPage(Page.APPEARANCE) }) }
                     item { SettingsChoice("Резервная копия", "Бэкап настроек браслета", { onPage(Page.BACKUP) }) }
+                    item { SettingsChoice(stringResource(R.string.nextcloud_health_title),
+                        if (snapshot.nextcloudHealth.authenticated)
+                            stringResource(R.string.nextcloud_health_connected_as,
+                                snapshot.nextcloudHealth.username.orEmpty())
+                        else stringResource(R.string.nextcloud_health_settings_summary),
+                        { onPage(Page.NEXTCLOUD_HEALTH) }) }
                     item { SettingsChoice("О приложении", "Fit3 App", { onPage(Page.ABOUT) }) }
                 }
                 Page.WATCH_SETTINGS -> {
@@ -1673,6 +1691,11 @@ private fun CompanionScreen(
                     }
                     if (backupMessage.isNotBlank()) item { Text(backupMessage,
                         color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                }
+                Page.NEXTCLOUD_HEALTH -> {
+                    item { NextcloudHealthSettingsPage(snapshot.nextcloudHealth,
+                        onNextcloudHealthConnect, onNextcloudHealthDisconnect,
+                        onNextcloudHealthUpload) }
                 }
                 Page.NOTIFICATIONS -> {
                     item {
@@ -3188,6 +3211,126 @@ private fun HealthVitalsCard(snapshot: BleSnapshot) {
         }
     }
 }
+
+@Composable
+private fun NextcloudHealthSettingsPage(
+    state: NextcloudHealthState,
+    onConnect: (String, String, String) -> Unit,
+    onDisconnect: () -> Unit,
+    onUpload: () -> Unit,
+) {
+    var serverUrl by remember(state.serverUrl) { mutableStateOf(state.serverUrl.orEmpty()) }
+    var username by remember(state.username) { mutableStateOf(state.username.orEmpty()) }
+    var appPassword by remember { mutableStateOf("") }
+    LaunchedEffect(state.authenticated) {
+        if (state.authenticated) appPassword = ""
+    }
+    Card {
+        Column(Modifier.fillMaxWidth().padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(stringResource(R.string.nextcloud_health_description), localize = false,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(stringResource(R.string.nextcloud_health_sync_scope), localize = false,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant)
+            HorizontalDivider()
+            Text(nextcloudHealthStatusLabel(state), localize = false,
+                style = MaterialTheme.typography.titleMedium)
+            state.detail?.takeIf { it.isNotBlank() }?.let { detail ->
+                Text(detail.take(240), localize = false, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            }
+            if (state.busy) LinearProgressIndicator(Modifier.fillMaxWidth())
+            if (!state.authenticated) {
+                OutlinedTextField(
+                    value = serverUrl,
+                    onValueChange = { serverUrl = it.take(500) },
+                    label = { Text(stringResource(R.string.nextcloud_health_server_url),
+                        localize = false) },
+                    placeholder = { Text(stringResource(R.string.nextcloud_health_server_url_hint),
+                        localize = false) },
+                    singleLine = true,
+                    enabled = !state.busy,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Uri),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = username,
+                    onValueChange = { username = it.take(320) },
+                    label = { Text(stringResource(R.string.nextcloud_health_username),
+                        localize = false) },
+                    singleLine = true,
+                    enabled = !state.busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                OutlinedTextField(
+                    value = appPassword,
+                    onValueChange = { appPassword = it.take(2048) },
+                    label = { Text(stringResource(R.string.nextcloud_health_app_password),
+                        localize = false) },
+                    supportingText = { Text(stringResource(
+                        R.string.nextcloud_health_app_password_hint), localize = false) },
+                    singleLine = true,
+                    enabled = !state.busy,
+                    visualTransformation = PasswordVisualTransformation(),
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
+                        keyboardType = androidx.compose.ui.text.input.KeyboardType.Password),
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Button(
+                    onClick = { onConnect(serverUrl.trim(), username.trim(), appPassword) },
+                    enabled = !state.busy && serverUrl.isNotBlank() && username.isNotBlank() &&
+                        appPassword.isNotBlank(),
+                ) { Text(stringResource(R.string.nextcloud_health_connect), localize = false) }
+                Text(stringResource(R.string.nextcloud_health_credentials_saved), localize = false,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+            } else {
+                Text(stringResource(R.string.nextcloud_health_connected_as,
+                    state.username.orEmpty()), localize = false)
+                state.serverUrl?.let { url ->
+                    Text(url, localize = false, style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.primary)
+                }
+                state.lastUploadAt?.let { timestamp ->
+                    Text(stringResource(R.string.nextcloud_health_last_upload,
+                        java.text.DateFormat.getDateTimeInstance(
+                            java.text.DateFormat.SHORT, java.text.DateFormat.SHORT)
+                            .format(java.util.Date(timestamp))), localize = false,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                if (state.pendingUpload) Text(
+                    stringResource(R.string.nextcloud_health_pending_upload), localize = false,
+                    style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.tertiary)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = onUpload, enabled = !state.busy) {
+                        Text(stringResource(R.string.nextcloud_health_upload_now), localize = false)
+                    }
+                    OutlinedButton(onClick = onDisconnect, enabled = !state.busy) {
+                        Text(stringResource(R.string.nextcloud_health_disconnect), localize = false)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun nextcloudHealthStatusLabel(state: NextcloudHealthState): String = stringResource(when (state.status) {
+    NextcloudHealthStatus.DISCONNECTED -> R.string.nextcloud_health_status_disconnected
+    NextcloudHealthStatus.CHECKING -> R.string.nextcloud_health_status_checking
+    NextcloudHealthStatus.CONNECTED -> R.string.nextcloud_health_status_connected
+    NextcloudHealthStatus.UPLOADING -> R.string.nextcloud_health_status_uploading
+    NextcloudHealthStatus.UPLOADED -> R.string.nextcloud_health_status_uploaded
+    NextcloudHealthStatus.NO_SUPPORTED_DATA -> R.string.nextcloud_health_status_no_data
+    NextcloudHealthStatus.AUTHENTICATION_FAILED -> R.string.nextcloud_health_status_authentication_failed
+    NextcloudHealthStatus.INVALID_SERVER -> R.string.nextcloud_health_status_invalid_server
+    NextcloudHealthStatus.APP_UNAVAILABLE -> R.string.nextcloud_health_status_app_unavailable
+    NextcloudHealthStatus.NETWORK_ERROR -> R.string.nextcloud_health_status_network_error
+    NextcloudHealthStatus.SERVER_ERROR -> R.string.nextcloud_health_status_server_error
+})
 
 @Composable
 private fun StressGauge(score: Int?, measuredAt: Long?) {

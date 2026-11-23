@@ -64,6 +64,7 @@ enum class SetupStage { IDLE, WAIT_INFO, WAIT_DEVICE, WAIT_SETTINGS, WAIT_AGREEM
 enum class GoalSyncState { LOCAL, PENDING, SENDING, SYNCED, FAILED }
 
 data class BleSnapshot(
+    val nextcloudHealth: NextcloudHealthState = NextcloudHealthState(),
     val firmwareFlash: FirmwareFlashState = FirmwareFlashState(),
     val bandFiles: BandFileState = BandFileState(),
     val status: String = "Не подключено",
