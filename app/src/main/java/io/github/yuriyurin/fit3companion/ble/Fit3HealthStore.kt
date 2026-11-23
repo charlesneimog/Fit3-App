@@ -7,8 +7,8 @@ import android.database.sqlite.SQLiteDatabase
 import android.database.sqlite.SQLiteOpenHelper
 import android.util.Base64
 import io.github.yuriyurin.fit3companion.protocol.Fit3HealthCodec
+import io.github.yuriyurin.fit3companion.protocol.Fit3HealthRecords
 import io.github.yuriyurin.fit3companion.protocol.Fit3PedometerBackSync
-import io.github.yuriyurin.fit3companion.protocol.Fit3VitalCodec
 import io.github.yuriyurin.fit3companion.protocol.Fit3Sleep
 import org.json.JSONArray
 import org.json.JSONObject
@@ -26,12 +26,159 @@ object Fit3HealthStore {
         val key = context.getDatabasePath("health-v2.db").absolutePath
         helpers.getOrPut(key) { HealthDatabase(context.applicationContext) }.writableDatabase
     }
-    private class HealthDatabase(context: Context) : SQLiteOpenHelper(context, "health-v2.db", null, 1) {
+    private class HealthDatabase(context: Context) : SQLiteOpenHelper(context, "health-v2.db", null, 2) {
         override fun onCreate(db: SQLiteDatabase) {
             db.execSQL("CREATE TABLE documents (name TEXT PRIMARY KEY, json TEXT NOT NULL)")
             db.execSQL("CREATE TABLE packets (hash TEXT PRIMARY KEY, source TEXT NOT NULL, received INTEGER NOT NULL, payload BLOB NOT NULL)")
+            Fit3HealthStore.createRecordTables(db)
         }
-        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+        override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+            if (oldVersion < 2) {
+                Fit3HealthStore.createRecordTables(db)
+                db.rawQuery("SELECT source,received,payload FROM packets ORDER BY received,hash", null).use { rows ->
+                    while (rows.moveToNext()) Fit3HealthStore.insertRecords(db, rows.getString(0),
+                        Fit3HealthRecords.decode(rows.getBlob(2), rows.getLong(1)), rows.getLong(1))
+                }
+            }
+        }
+    }
+
+    private fun createRecordTables(db: SQLiteDatabase) {
+        db.execSQL("""CREATE TABLE IF NOT EXISTS health_records (
+            source TEXT NOT NULL,
+            metric TEXT NOT NULL,
+            aggregation TEXT NOT NULL,
+            wire_type INTEGER NOT NULL,
+            start INTEGER NOT NULL,
+            end INTEGER,
+            value REAL NOT NULL,
+            minimum REAL,
+            maximum REAL,
+            group_id TEXT NOT NULL DEFAULT '',
+            received INTEGER NOT NULL,
+            PRIMARY KEY (source,metric,aggregation,start,group_id)
+        )""".trimIndent())
+        db.execSQL("CREATE INDEX IF NOT EXISTS health_records_metric_time ON health_records(metric,start)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS health_records_source_time ON health_records(source,start)")
+    }
+
+    data class WriteResult(
+        val decoded: Int,
+        val inserted: Int,
+        val updated: Int,
+        val unchanged: Int,
+        val records: List<Fit3HealthRecords.Record>,
+    ) {
+        fun diagnostic(): String {
+            if (records.isEmpty()) return "records=0 stored=0"
+            val metrics = records.groupBy { it.metric.storageName }.toSortedMap().entries.joinToString(";") { (name, rows) ->
+                val times = rows.map { it.measuredAt }.distinct().sorted()
+                val shown = if (times.size <= 12) times.joinToString(",") else
+                    "${times.take(5).joinToString(",")},...,${times.takeLast(5).joinToString(",")}"
+                "$name=${rows.size}[$shown]"
+            }
+            return "records=$decoded inserted=$inserted updated=$updated duplicate=$unchanged metrics=$metrics"
+        }
+    }
+
+    data class StoredRecord(
+        val source: String,
+        val record: Fit3HealthRecords.Record,
+        val received: Long,
+    )
+
+    private data class RecordStats(val inserted: Int, val updated: Int, val unchanged: Int)
+
+    private fun insertRecords(
+        db: SQLiteDatabase,
+        source: String,
+        records: List<Fit3HealthRecords.Record>,
+        received: Long,
+    ): RecordStats {
+        var inserted = 0
+        var updated = 0
+        var unchanged = 0
+        records.forEach { record ->
+            require(source.length in 1..100 && record.groupId.length <= 100)
+            var exists = false
+            var same = false
+            db.rawQuery("""SELECT wire_type,end,value,minimum,maximum FROM health_records
+                WHERE source=? AND metric=? AND aggregation=? AND start=? AND group_id=?""".trimIndent(),
+                arrayOf(source, record.metric.storageName, record.aggregation.storageName,
+                    record.startMillis.toString(), record.groupId)).use { row ->
+                if (row.moveToFirst()) {
+                    exists = true
+                    fun nullableLong(index: Int) = if (row.isNull(index)) null else row.getLong(index)
+                    fun nullableDouble(index: Int) = if (row.isNull(index)) null else row.getDouble(index)
+                    same = row.getInt(0) == record.wireType && nullableLong(1) == record.endMillis &&
+                        row.getDouble(2) == record.value && nullableDouble(3) == record.minimum &&
+                        nullableDouble(4) == record.maximum
+                }
+            }
+            if (same) {
+                unchanged++
+            } else {
+                val row = db.insertWithOnConflict("health_records", null, ContentValues().apply {
+                    put("source", source)
+                    put("metric", record.metric.storageName)
+                    put("aggregation", record.aggregation.storageName)
+                    put("wire_type", record.wireType)
+                    put("start", record.startMillis)
+                    if (record.endMillis == null) putNull("end") else put("end", record.endMillis)
+                    put("value", record.value)
+                    if (record.minimum == null) putNull("minimum") else put("minimum", record.minimum)
+                    if (record.maximum == null) putNull("maximum") else put("maximum", record.maximum)
+                    put("group_id", record.groupId)
+                    put("received", received)
+                }, SQLiteDatabase.CONFLICT_REPLACE)
+                check(row != -1L) { "Не удалось сохранить запись здоровья" }
+                if (exists) updated++ else inserted++
+            }
+        }
+        return RecordStats(inserted, updated, unchanged)
+    }
+
+    /** Complete local history, ordered by the watch's measurement time (not sync time). */
+    @Synchronized fun records(
+        context: Context,
+        metric: Fit3HealthRecords.Metric? = null,
+        source: String? = null,
+        fromMillis: Long = 0L,
+        untilMillis: Long = Long.MAX_VALUE,
+        limit: Int = 100_000,
+    ): List<StoredRecord> {
+        require(fromMillis >= 0 && untilMillis >= fromMillis && limit in 1..100_000)
+        val where = mutableListOf("start>=?", "start<?")
+        val args = mutableListOf(fromMillis.toString(), untilMillis.toString())
+        metric?.let { where += "metric=?"; args += it.storageName }
+        source?.let { require(it.length in 1..100); where += "source=?"; args += it }
+        args += limit.toString()
+        val result = ArrayList<StoredRecord>()
+        database(context).rawQuery("""SELECT source,metric,aggregation,wire_type,start,end,value,
+            minimum,maximum,group_id,received FROM health_records
+            WHERE ${where.joinToString(" AND ")} ORDER BY start,metric,aggregation LIMIT ?""".trimIndent(),
+            args.toTypedArray()).use { rows ->
+            while (rows.moveToNext()) {
+                val rowMetric = Fit3HealthRecords.Metric.values().firstOrNull {
+                    it.storageName == rows.getString(1)
+                } ?: continue
+                val aggregation = Fit3HealthRecords.Aggregation.values().firstOrNull {
+                    it.storageName == rows.getString(2)
+                } ?: continue
+                result += StoredRecord(rows.getString(0), Fit3HealthRecords.Record(
+                    metric = rowMetric,
+                    aggregation = aggregation,
+                    wireType = rows.getInt(3),
+                    startMillis = rows.getLong(4),
+                    endMillis = if (rows.isNull(5)) null else rows.getLong(5),
+                    value = rows.getDouble(6),
+                    minimum = if (rows.isNull(7)) null else rows.getDouble(7),
+                    maximum = if (rows.isNull(8)) null else rows.getDouble(8),
+                    groupId = rows.getString(9),
+                ), rows.getLong(10))
+            }
+        }
+        return result
     }
 
     fun load(context: Context): Fit3HealthCodec.State = runCatching {
@@ -100,19 +247,27 @@ object Fit3HealthStore {
     }
 
     private fun documentWithHistory(context: Context, state: Fit3HealthCodec.State,
-                                    payload: ByteArray? = null): JSONObject {
+                                    records: List<Fit3HealthRecords.Record> = emptyList()): JSONObject {
         val previous = readDocument(context)
         val document = encode(state)
         val history = previous?.optJSONObject("history") ?: JSONObject()
-        appendMeasurement(history, "steps", state.lastSyncMillis, state.steps)
         appendMeasurement(history, "heartRate", state.heartRateAt, state.heartRate)
         appendMeasurement(history, "stress", state.stressAt, state.stress)
         appendMeasurement(history, "spo2", state.spo2At, state.spo2)
         appendMeasurement(history, "sleepMinutes", state.sleepEndAt, state.sleepMinutes)
-        // Preserve every decoded measurement in a batch, not merely its newest value.
-        payload?.let(Fit3VitalCodec::parse)?.forEach { sample ->
-            val name = when (sample.type) { 10 -> "heartRate"; 19 -> "stress"; 112 -> "spo2"; else -> null }
-            if (name != null) appendMeasurement(history, name, sample.measuredAt, sample.value)
+        // This legacy JSON view remains available to backups. SQLite health_records below is
+        // authoritative and unbounded; these points retain their watch timestamps.
+        records.forEach { record ->
+            val name = when (record.metric) {
+                Fit3HealthRecords.Metric.STEPS -> "steps"
+                Fit3HealthRecords.Metric.HEART_RATE -> "heartRate"
+                Fit3HealthRecords.Metric.STRESS -> "stress"
+                Fit3HealthRecords.Metric.SPO2 -> "spo2"
+                Fit3HealthRecords.Metric.SLEEP_DURATION_MINUTES -> "sleepMinutes"
+                else -> null
+            }
+            if (name != null) appendMeasurement(history, name, record.measuredAt,
+                record.value.toInt())
         }
         document.put("history", history)
         val daily = previous?.optJSONObject("dailySteps") ?: JSONObject()
@@ -123,10 +278,12 @@ object Fit3HealthStore {
 
     /** The transaction is the acceptance boundary: any failure prevents the caller's ACK. */
     @Synchronized fun accept(context: Context, source: String, state: Fit3HealthCodec.State,
-                             payload: ByteArray, received: Long) {
+                             payload: ByteArray, received: Long): WriteResult {
         require(payload.size in 1..1_048_576)
-        val document = documentWithHistory(context, state, payload)
+        val records = Fit3HealthRecords.decode(payload, received)
+        val document = documentWithHistory(context, state, records)
         val db = database(context)
+        var stats = RecordStats(0, 0, 0)
         db.beginTransaction()
         try {
             db.insertWithOnConflict("packets", null, ContentValues().apply {
@@ -137,9 +294,11 @@ object Fit3HealthStore {
                 if (it == -1L) db.rawQuery("SELECT 1 FROM packets WHERE hash=?",
                     arrayOf(packetHash(source, payload))).use { cursor -> require(cursor.moveToFirst()) }
             }
+            stats = insertRecords(db, source, records, received)
             putDocument(db, document)
             db.setTransactionSuccessful()
         } finally { db.endTransaction() }
+        return WriteResult(records.size, stats.inserted, stats.updated, stats.unchanged, records)
     }
 
     private fun packetHash(source: String, payload: ByteArray): String = MessageDigest.getInstance("SHA-256")
@@ -199,6 +358,7 @@ object Fit3HealthStore {
                 }, SQLiteDatabase.CONFLICT_IGNORE)
                 if (row == -1L) db.rawQuery("SELECT 1 FROM packets WHERE hash=?", arrayOf(hash))
                     .use { require(it.moveToFirst()) }
+                insertRecords(db, source, Fit3HealthRecords.decode(payload, at), at)
             }
             val snapshot = JSONObject(document.toString()).apply { remove("packetArchive") }
             val oldSleep = readDocument(context)?.let(::decode)
@@ -296,6 +456,7 @@ object Fit3HealthStore {
         state.stepSourceAddress?.let { put("stepSourceAddress", it) }
         number("lastSyncMillis", state.lastSyncMillis)
         number("lastSuccessfulSyncMillis", state.lastSuccessfulSyncMillis)
+        number("historySyncCursorMillis", state.historySyncCursorMillis)
         put("stepsPartial", state.stepsPartial)
         put("stepHistory", JSONArray(state.stepHistory.takeLast(96)))
         put("stepRecords", JSONArray().apply {
@@ -368,6 +529,7 @@ object Fit3HealthStore {
             stepsPartial = json.optBoolean("stepsPartial"), stepDay = long("stepDay"),
             lastSyncMillis = long("lastSyncMillis"),
             lastSuccessfulSyncMillis = long("lastSuccessfulSyncMillis"),
+            historySyncCursorMillis = long("historySyncCursorMillis"),
         )
     }
 

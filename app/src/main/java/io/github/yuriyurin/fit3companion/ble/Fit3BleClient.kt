@@ -21,6 +21,7 @@ import android.graphics.Canvas
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.text.format.DateFormat
 import io.github.yuriyurin.fit3companion.protocol.Fit3OobeCodec
 import io.github.yuriyurin.fit3companion.protocol.Fit3BatteryCodec
@@ -159,6 +160,10 @@ class Fit3BleClient(
     private var backSyncWireToken = 0
     private var pendingHealthRequest: Int? = null
     private var pendingHealthRequestAt = 0L
+    private val healthWakeLock = (context.getSystemService(Context.POWER_SERVICE) as PowerManager)
+        .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "${context.packageName}:health-sync").apply {
+            setReferenceCounted(false)
+        }
     private val refreshSession = Fit3RefreshSession()
     private var goalSequence: Int? = null
     private var goalRevision = 0L
@@ -166,6 +171,14 @@ class Fit3BleClient(
     private fun nextHealthSequence(): Int {
         healthRequestSequence = if (healthRequestSequence >= 0xffff) 1 else healthRequestSequence + 1
         return healthRequestSequence
+    }
+    private fun holdHealthWakeLock() {
+        if (!healthWakeLock.isHeld) healthWakeLock.acquire(60_000L)
+    }
+    private fun clearPendingHealthRequest() {
+        pendingHealthRequest = null
+        pendingHealthRequestAt = 0L
+        if (healthWakeLock.isHeld) healthWakeLock.release()
     }
     private var lastAddress: String? = null
     private var reconnectAttempt = 0
@@ -395,7 +408,7 @@ class Fit3BleClient(
                     backSyncWireToken++
                     notificationIconSender.reset()
                     refreshSession.reset()
-                    pendingHealthRequest = null
+                    clearPendingHealthRequest()
                     healthCapabilityReady = false
                     goalSequence = null
                     goalAttempts = 0
@@ -761,19 +774,24 @@ class Fit3BleClient(
                             main.postDelayed({ if (thisGeneration == generation) sendPendingActivityGoals() }, 500)
                         }
                     }
+                    var stored: Fit3HealthStore.WriteResult? = null
                     val incoming = try {
                         Fit3HealthAcceptance.accept(snapshot.health, payload, now, lastAddress) { state, packet ->
-                            Fit3HealthStore.accept(context, lastAddress.orEmpty(), state, packet, now)
+                            stored = Fit3HealthStore.accept(context, lastAddress.orEmpty(), state, packet, now)
                         }
                     } catch (error: Exception) {
                         // Do not announce acceptance of records that failed to reach durable storage.
                         // The watch can retry; the UI retains the last successfully committed state.
                         protocolLog("HEALTH-SAVE-FAILED", null, error.javaClass.simpleName.toByteArray())
                         refreshSession.reset()
-                        pendingHealthRequest = null
+                        clearPendingHealthRequest()
                         snapshot = snapshot.copy(refreshing = false, healthStatus = "Не удалось сохранить данные. Повторите обновление.")
                         publish()
                         return@post
+                    }
+                    if (incoming.event == Fit3HealthCodec.Event.SYNC_DATA) {
+                        protocolLog("HEALTH-STORED", null,
+                            stored?.diagnostic().orEmpty().toByteArray(Charsets.UTF_8))
                     }
                     snapshot = snapshot.copy(health = incoming.state, healthStatus = incoming.status,
                         lastRefreshMillis = incoming.state.lastSuccessfulSyncMillis ?: snapshot.lastRefreshMillis)
@@ -1606,7 +1624,13 @@ class Fit3BleClient(
         val sequence = nextHealthSequence()
         pendingHealthRequest = sequence
         pendingHealthRequestAt = now
-        sendReadOnly(Fit3SapCodec.SERVICE_HEALTH, Fit3HealthCodec.requestData(sequence, now))
+        holdHealthWakeLock()
+        val sameWatch = lastAddress != null &&
+            lastAddress.equals(snapshot.health.stepSourceAddress, ignoreCase = true)
+        val cursor = if (sameWatch) snapshot.health.historySyncCursorMillis
+            ?.minus(5 * 60_000L)?.coerceAtLeast(946_684_800_000L) ?: 0L else 0L
+        sendReadOnly(Fit3SapCodec.SERVICE_HEALTH,
+            Fit3HealthCodec.requestData(sequence, now, cursor))
     }
 
     private fun scheduleRefreshCompletion() {
@@ -1616,9 +1640,16 @@ class Fit3BleClient(
             when (refreshSession.poll(System.currentTimeMillis())) {
                 Fit3RefreshSession.Result.WAITING -> scheduleRefreshCompletion()
                 Fit3RefreshSession.Result.SUCCESS -> {
-                    pendingHealthRequest = null
+                    val completedThrough = pendingHealthRequestAt.takeIf { pendingHealthRequest != null && it > 0L }
+                    clearPendingHealthRequest()
                     val now = System.currentTimeMillis()
-                    val state = snapshot.health.copy(lastSuccessfulSyncMillis = now)
+                    val state = snapshot.health.copy(
+                        lastSuccessfulSyncMillis = now,
+                        historySyncCursorMillis = listOfNotNull(
+                            snapshot.health.historySyncCursorMillis,
+                            completedThrough,
+                        ).maxOrNull(),
+                    )
                     try {
                         Fit3HealthStore.save(context, state)
                         snapshot = snapshot.copy(health = state, refreshing = false, lastRefreshMillis = now)
@@ -1632,7 +1663,7 @@ class Fit3BleClient(
                     }
                 }
                 Fit3RefreshSession.Result.TIMEOUT -> {
-                    pendingHealthRequest = null
+                    clearPendingHealthRequest()
                     healthCapabilityProbePending = false
                     snapshot = snapshot.copy(refreshing = false, healthStatus = "Браслет не ответил на обновление")
                     publish()
@@ -2271,7 +2302,7 @@ class Fit3BleClient(
         backSyncWireToken++
         notificationIconSender.reset()
         refreshSession.reset()
-        pendingHealthRequest = null
+        clearPendingHealthRequest()
         healthCapabilityReady = false
         healthCapabilityProbePending = false
         cancelFaceInstall(if (updateStatus) "Установка отменена" else "Связь прервана во время установки")

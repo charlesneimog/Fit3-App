@@ -123,14 +123,23 @@ object Fit3HealthCodec {
      * A zero last-sync cursor asks for a full exchange; never invent phone step totals.
      * DeviceInfo's version minor is decimal (createDeviceInfoByte), unlike CAPA's BCD.
      */
-    fun requestData(sequence: Int, now: Long): ByteArray {
+    fun requestData(sequence: Int, now: Long): ByteArray = requestData(sequence, now, 0L)
+
+    /**
+     * Incremental variant. DeviceInfo field 4 is LAST_SYNC_TIME in the stock plugin; using a
+     * durable cursor makes reconnects request accumulated watch history instead of only "now".
+     * The caller deliberately overlaps the cursor and SQLite performs semantic de-duplication.
+     */
+    fun requestData(sequence: Int, now: Long, lastSyncMillis: Long): ByteArray {
         require(sequence in 1..0xffff)
         val end = ((now / 1000L) - 631_152_000L).coerceIn(0, 0xffff_ffffL).toInt()
+        val lastSync = if (lastSyncMillis <= 0L) 0 else
+            ((lastSyncMillis / 1000L) - 631_152_000L).coerceIn(0, 0xffff_ffffL).toInt()
         return ByteArrayOutputStream().apply {
             write(3)
             write(SaMessageCodec.shortParam(0xE0, sequence))
             write(byteArrayOf(5, 25, 1, 0, 2, 0, 0, 3, 4, 51))
-            write(SaMessageCodec.intParam(4, 0))
+            write(SaMessageCodec.intParam(4, lastSync))
             write(SaMessageCodec.intParam(5, 0))
             write(SaMessageCodec.intParam(6, end))
             write(byteArrayOf(7, 1))
@@ -196,6 +205,7 @@ object Fit3HealthCodec {
         val lastTransportMillis: Long? = null,
         val lastSyncMillis: Long? = null,
         val lastSuccessfulSyncMillis: Long? = null,
+        val historySyncCursorMillis: Long? = null,
     ) {
         val hasActivityData: Boolean get() = steps != null || distanceMeters != null ||
             activeCalories != null || floors != null
@@ -511,8 +521,16 @@ object Fit3HealthCodec {
         // Actual AZA3 captures contain type 7 interval records before any day-summary packet.
         // Canonicalise start times to firmware minute bins. Retransmission or a reset must
         // not add a second copy of the same bin. Distinct bins survive for back-sync.
-        parsePedometerIntervals(message)?.let { intervals ->
+        Fit3HealthRecords.pedometerIntervals(message)?.let { decoded ->
             types += DATA_PEDO_STEP_COUNT
+            val intervals = decoded.associate { interval -> interval.startMillis to StepRecord(
+                count = interval.steps,
+                walk = interval.walk,
+                run = interval.run,
+                distanceMeters = interval.distanceMeters,
+                calories = interval.calories,
+                durationMillis = interval.durationMillis,
+            ) }
             val day = Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
             val base = if (previous.stepDay != null &&
                 previous.stepDay != day.toEpochDay()) previous.copy(
@@ -546,13 +564,26 @@ object Fit3HealthCodec {
         // dates are not decoded yet; a byte inside a type-7 or vital record can look like a
         // summary and produce a plausible but entirely false today's step count.
 
-        if (message.size > 5 && (message[5].toInt() and 0xff) == DATA_FLOORS_CLIMBED) {
-            findTypeWindow(message, DATA_FLOORS_CLIMBED)?.let { (start, end) ->
-                types += DATA_FLOORS_CLIMBED
-                findNumber(message, start, end, FLOOR_VALUE, 0.0..500.0)?.let {
-                    next = next.copy(floors = it, lastSyncMillis = now)
+        Fit3HealthRecords.dailyCalories(message)?.let { records ->
+            types += DATA_CALORIES_BURNED
+            val today = Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
+            records.filter { Instant.ofEpochMilli(it.dayMillis).atZone(ZoneId.systemDefault()).toLocalDate() == today }
+                .maxByOrNull { it.dayMillis }?.let { daily ->
+                    next = next.copy(activeCalories = daily.activeCalories,
+                        activeMinutes = daily.activeMinutes, lastSyncMillis = now)
                 }
+        }
+
+        Fit3HealthRecords.floorSamples(message)?.let { records ->
+            types += DATA_FLOORS_CLIMBED
+            val today = Instant.ofEpochMilli(now).atZone(ZoneId.systemDefault()).toLocalDate()
+            val current = records.filter {
+                Instant.ofEpochMilli(it.endMillis).atZone(ZoneId.systemDefault()).toLocalDate() == today
             }
+            if (current.isNotEmpty()) next = next.copy(
+                floors = current.sumOf { it.floors }.coerceIn(0.0, 500.0),
+                lastSyncMillis = now,
+            )
         }
 
         // Unlike step intervals, these feature records carry a 4-byte length before each
@@ -568,9 +599,9 @@ object Fit3HealthCodec {
             types += type
             val sample = samples.maxByOrNull { it.measuredAt ?: Long.MIN_VALUE } ?: return@let
             val at = sample.measuredAt ?: return@let
-            val maxFuture = now + 5 * 60_000L
-            val maxAge = if (type == DATA_SLEEP) 48 * 60 * 60_000L else 24 * 60 * 60_000L
-            if (at !in (now - maxAge)..maxFuture) return@let
+            // The Fit3 retains historical samples. Reject impossible dates, but never drop a
+            // valid old sample merely because the phone reconnected days later.
+            if (at !in 946_684_800_000L..(now + 5 * 60_000L)) return@let
             when (type) {
                 DATA_HEART_RATE -> {
                     val hr = sample.value?.takeIf { it in 25..250 }
@@ -623,55 +654,6 @@ object Fit3HealthCodec {
         if (next.sleepEpisodes.isNotEmpty()) next = next.copy(sleepMinutes =
             Fit3Sleep.todayMinutes(next.sleepEpisodes, next.sleepStages, now, java.time.ZoneId.systemDefault()))
         return next to types
-    }
-
-    /** Samsung's type-7 PedometerStepCount: continuation byte, then 12 fixed fields. */
-    private fun parsePedometerIntervals(message: ByteArray): Map<Long, StepRecord>? {
-        if (message.size < 8 || (message[0].toInt() and 0xff) != 0x82 ||
-            (message[2].toInt() and 0xff) != GM_SEQUENCE_NUMBER ||
-            (message[5].toInt() and 0xff) != DATA_PEDO_STEP_COUNT) return null
-        val result = linkedMapOf<Long, StepRecord>()
-        var i = 6
-        repeat(128) {
-            if (i >= message.size) return result.takeIf { it.isNotEmpty() }
-            val more = message[i++].toInt() and 0xff
-            if (more !in 0..1) return null
-            var start: Long? = null
-            var count: Int? = null
-            var walk = 0
-            var run = 0
-            var distance = 0.0
-            var calories = 0.0
-            var duration = 0
-            val fields = intArrayOf(5, 1, 2, 3, 16, 17, 18, 19, 20, 21, 22, 23)
-            for (field in fields) {
-                if (i >= message.size || (message[i++].toInt() and 0xff) != field) return null
-                val width = if (field == 23) 1 else 4
-                if (i + width > message.size) return null
-                if (width == 4) {
-                    val raw = ByteBuffer.wrap(message, i, 4).order(ByteOrder.LITTLE_ENDIAN).int
-                    when (field) {
-                        1 -> start = (raw.toLong() and 0xffffffffL) * 1000L + 631_152_000_000L
-                        16 -> count = raw.takeIf { it in 0..100_000 }
-                        17 -> distance = Float.fromBits(raw).toDouble()
-                        19 -> calories = Float.fromBits(raw).toDouble()
-                        20 -> run = raw
-                        21 -> walk = raw
-                        22 -> duration = raw
-                    }
-                }
-                i += width
-            }
-            val key = start ?: return null
-            val steps = count ?: return null
-            if (walk !in 0..steps || run !in 0..steps ||
-                !distance.isFinite() || distance !in 0.0..100_000.0 ||
-                !calories.isFinite() || calories !in 0.0..10_000.0 ||
-                duration !in 0..86_400_000) return null
-            result[key] = StepRecord(steps, walk, run, distance, calories, duration)
-            if (more == 0) return result
-        }
-        return null
     }
 
     /** Window from a distinctive feature type byte to the next distinctive feature type. */

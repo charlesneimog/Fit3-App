@@ -14,6 +14,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.net.Uri
 import android.provider.DocumentsContract
 import java.util.concurrent.Executors
@@ -65,11 +66,13 @@ class Fit3ConnectionService : Service() {
     }
     private val refresh = object : Runnable {
         override fun run() {
-            val now = System.currentTimeMillis()
+            val now = SystemClock.elapsedRealtime()
             if (snapshot.sapReady && !snapshot.refreshing &&
                 now - lastPeriodicHealthPoll >= 5 * 60_000L) {
                 lastPeriodicHealthPoll = now
-                ble.refresh(manual = false)
+                // Automatic polling only asks for recorded Health history. A full refresh also
+                // queries faces and settings and would waste radio/band battery every five minutes.
+                ble.requestHealthSnapshot()
             }
             if (snapshot.sapReady) refreshWeatherIfNeeded()
             maybeAutoBackup()
@@ -199,6 +202,14 @@ class Fit3ConnectionService : Service() {
                     weatherForecast?.let(ble::sendWeather)
                     refreshWeatherIfNeeded()
                 }, 1600)
+                // Reconnect is the important catch-up boundary: ask for everything accumulated
+                // since the last durable cursor without waiting for the next five-minute tick.
+                handler.postDelayed({
+                    if (snapshot.sapReady) {
+                        lastPeriodicHealthPoll = SystemClock.elapsedRealtime()
+                        ble.requestHealthSnapshot()
+                    }
+                }, 2_000)
             }
             val readyForSettings = current.sapReady && current.setupStage in
                 setOf(SetupStage.IDLE, SetupStage.COMPLETE)
